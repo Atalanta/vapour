@@ -19,11 +19,9 @@ class Vapour
   end
 
   def describe_stacks(name = nil)
-    if name
-      request('Action' => 'DescribeStacks', 'StackName' => name)
-    else
-      request('Action' => 'DescribeStacks')
-    end
+    query = {'Action' => 'DescribeStacks'}
+    query['StackName'] = name if name
+    Stack.create_from_response(request(query))
   end
 
   # options are:
@@ -36,15 +34,12 @@ class Vapour
   end
 
   # Validates a specified template.
-  # String containing the template body. (For more information, go to the AWS CloudFormation User Guide.)
-  # TemplateBody
   def validate_template_body(body)
     request('Action' => 'ValidateTemplate',
             'TemplateBody' => body)
   end
 
   # Validates a specified template.
-  # TemplateURL
   def validate_template_url(url)
     request('Action' => 'ValidateTemplate',
             'TemplateURL' => url)
@@ -115,10 +110,47 @@ class Vapour
       gsub("+", "%20").
       gsub("*", "%2A")
   end
+
+  class Stack < Struct.new(
+    :id, :status, :description, :name, :creation_time, :disable_rollback,
+    :status_reason, :parameters, :outputs
+  )
+    MEMBER_XPATH = '//aws:DescribeStacksResponse/aws:DescribeStacksResult/aws:Stacks/aws:member'
+
+    def self.create_from_response(response)
+      stack_members = response.xpath(MEMBER_XPATH, NS)
+      stack_members.map do |stack_member|
+        instance = new(
+          stack_member.xpath('aws:StackId', NS).text,
+          stack_member.xpath('aws:StackStatus', NS).text,
+          stack_member.xpath('aws:Description', NS).text,
+          stack_member.xpath('aws:StackName', NS).text,
+          Time.iso8601(stack_member.xpath('aws:CreationTime', NS).text),
+          stack_member.xpath('aws:DisableRollback', NS).text == 'true',
+          stack_member.xpath('aws:StackStatusReason', NS).text,
+          {},
+          {}, 
+        )
+        stack_member.xpath('aws:Parameters/aws:member', NS).each do |member|
+          key = member.xpath('aws:ParameterKey', NS).text
+          value = member.xpath('aws:ParameterValue', NS).text
+          instance.parameters[key] = value
+        end
+
+        stack_member.xpath('aws:Outputs/aws:member', NS).each do |member|
+          key = member.xpath('aws:OutputKey', NS).text
+          value = member.xpath('aws:OutputValue', NS).text
+          instance.outputs[key] = value
+        end
+
+        instance
+      end
+    end
+  end
 end
 
 key = ENV['AWS_ACCESS_KEY_ID']
 secret = ENV['AWS_SECRET_ACCESS_KEY']
 vapour = Vapour.new(key, secret)
-puts vapour.describe_stacks
-puts vapour.describe_stack_resources('StackName' => 'sns2')
+pp vapour.describe_stacks
+# puts vapour.describe_stack_resources('StackName' => 'sns2')
