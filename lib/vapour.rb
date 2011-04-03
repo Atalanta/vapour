@@ -76,8 +76,8 @@ class Vapour
     query.merge!(given)
 
     response = request(query).xpath('//aws:CreateStackResponse', NS)
-    id = response.xpath('//aws:CreateStackResult/aws:StackId', NS).text
-    rid = response.xpath('//aws:ResponseMetadata/aws:RequestId', NS).text
+    id = response.xpath('aws:CreateStackResult/aws:StackId', NS).text
+    rid = response.xpath('aws:ResponseMetadata/aws:RequestId', NS).text
     return {:stack_id => id, :response_id => id}
   end
 
@@ -129,16 +129,30 @@ class Vapour
     return {:request_id => rid, :stack_resources => resources}
   end
 
+  # +name+ The name or the unique identifier associated with the stack.
+  def get_template(name)
+    response = request('Action' => 'GetTemplate', 'StackName' => name)
+    rid = response.xpath('//aws:GetTemplateResponse/aws:ResponseMetadata/aws:RequestId', NS).text
+    template_body = response.xpath('//aws:GetTemplateResponse/aws:GetTemplateResult/aws:TemplateBody', NS).text
+    return {:request_id => rid, :body => JSON.parse(template_body)}
+  end
+
   # Validates a specified template.
   def validate_template_body(body)
-    request('Action' => 'ValidateTemplate',
-            'TemplateBody' => body)
+    response = request('Action' => 'ValidateTemplate', 'TemplateBody' => body)
+    rid = response.xpath('//aws:ValidateTemplateResponse/aws:ResponseMetadata/aws:RequestId', NS).text
+    result = ValidateTemplateResult.create_from_response(response)
+
+    return {request_id: rid, result: result}
   end
 
   # Validates a specified template.
   def validate_template_url(url)
-    request('Action' => 'ValidateTemplate',
-            'TemplateURL' => url)
+    response = request('Action' => 'ValidateTemplate', 'TemplateURL' => url)
+    rid = response.xpath('//aws:ValidateTemplateResponse/aws:ResponseMetadata/aws:RequestId', NS).text
+    result = ValidateTemplateResult.create_from_response(response)
+
+    return {request_id: rid, result: result}
   end
 
   def request(query)
@@ -287,6 +301,27 @@ class Vapour
       }
     end
   end
+
+  class ValidateTemplateResult < Struct.new(:description, :parameters)
+    class Parameter < Struct.new(:no_echo, :key, :description)
+      def self.create_from_member(member)
+        new(member.xpath('aws:NoEcho', NS).text == 'true',
+            member.xpath('aws:ParameterKey', NS).text,
+            member.xpath('aws:Description', NS).text)
+      end
+    end
+
+    RESULT_XPATH = '//aws:ValidateTemplateResponse/aws:ValidateTemplateResult'
+
+    def self.create_from_response(response)
+      result = response.xpath(RESULT_XPATH, NS)
+      description = result.xpath('aws:Description', NS).text
+      parameters = result.xpath('aws:Parameters/aws:member', NS).map{|member|
+        Parameter.create_from_member(member)
+      }
+      new(description, parameters)
+    end
+  end
 end
 
 if __FILE__ == $0
@@ -294,5 +329,5 @@ if __FILE__ == $0
   secret = ENV['AWS_SECRET_ACCESS_KEY']
   vapour = Vapour.new(key, secret)
 
-  pp vapour.describe_stack_resources('StackName' => 'sns2')
+  pp vapour.validate_template_body(File.read('template3.json'))
 end
