@@ -10,6 +10,8 @@ require 'nokogiri'
 
 class Vapour
   Error = Class.new(RuntimeError)
+  AlreadyExistsException = Class.new(Error)
+  ValidationError = Class.new(Error)
 
   NS = {'aws' => 'http://cloudformation.amazonaws.com/doc/2010-05-15/'}
   DIGEST = OpenSSL::Digest::Digest.new("sha256")
@@ -73,7 +75,40 @@ class Vapour
 
     query.merge!(given)
 
-    request(query)
+    response = request(query).xpath('//aws:CreateStackResponse', NS)
+    id = response.xpath('//aws:CreateStackResult/aws:StackId', NS).text
+    rid = response.xpath('//aws:ResponseMetadata/aws:RequestId', NS).text
+    return {:stack_id => id, :response_id => id}
+  end
+
+  # Deletes a specified stack. Once the call completes successfully, stack
+  # deletion starts. Deleted stacks do not show up in the DescribeStacks API if
+  # the deletion has been completed successfully.
+  #
+  # +name+ The name or the unique identifier associated with the stack.
+  def delete_stack(name)
+    response = request('Action' => 'DeleteStack', 'StackName' => name)
+    rid = response.xpath('//aws:DeleteStackResponse/aws:ResponseMetadata/aws:RequestId', NS).text
+    return {:request_id => id}
+  end
+
+  # NextToken
+  #   String that identifies the start of the next list of events, if there is
+  #   one. Default: There is no default value.
+  #   Type: String
+  #   Length constraints: Minimum value of 1. Maximum value of 1024.
+  #   Not Required
+  #
+  # StackName
+  #   The name or the unique identifier associated with the stack. Default:
+  #   There is no default value.
+  #   Type: String
+  def describe_stack_events(options = {})
+    query = {'Action' => 'DescribeStackEvents'}.merge(options)
+    response = request(query)
+    rid = response.xpath('//aws:DescribeStackEventsResponse/aws:ResponseMetadata/aws:RequestId', NS).text
+    events = StackEvent.create_from_response(response)
+    return {:request_id => rid, :events => events}
   end
 
   def describe_stacks(name = nil)
@@ -140,7 +175,12 @@ class Vapour
     type = error.xpath('//aws:Type', NS).text
     code = error.xpath('//aws:Code', NS).text
     message = error.xpath('//aws:Message', NS).text
-    raise Error, "Type: #{type}, Code: #{code}, Message: #{message}"
+
+    begin
+      raise self.class.const_get(code), message
+    rescue NameError
+      raise Error, "Type: #{type}, Code: #{code}, Message: #{message}"
+    end
   end
 
   def sign_request(verb, url, data)
@@ -165,14 +205,18 @@ class Vapour
       gsub("*", "%2A")
   end
 
+  def self.snake_case(string)
+    string.gsub(/\B[A-Z][^A-Z]/, '_\&').downcase.gsub(' ', '_')
+  end
+
   class Stack < Struct.new(
     :id, :status, :description, :name, :creation_time, :disable_rollback,
-    :status_reason, :parameters, :outputs
-  )
+    :status_reason, :parameters, :outputs)
     MEMBER_XPATH = '//aws:DescribeStacksResponse/aws:DescribeStacksResult/aws:Stacks/aws:member'
 
     def self.create_from_response(response)
       stack_members = response.xpath(MEMBER_XPATH, NS)
+
       stack_members.map do |stack_member|
         instance = new(
           stack_member.xpath('aws:StackId', NS).text,
@@ -183,8 +227,9 @@ class Vapour
           stack_member.xpath('aws:DisableRollback', NS).text == 'true',
           stack_member.xpath('aws:StackStatusReason', NS).text,
           {},
-          {}, 
+          {},
         )
+
         stack_member.xpath('aws:Parameters/aws:member', NS).each do |member|
           key = member.xpath('aws:ParameterKey', NS).text
           value = member.xpath('aws:ParameterValue', NS).text
@@ -201,14 +246,42 @@ class Vapour
       end
     end
   end
+
+  class StackEvent < Struct.new(
+    :timestamp, :stack_id, :resource_status, :event_id, :logical_resource_id, :stack_name,
+    :physical_resource_id, :resource_properties, :resource_type, :resource_status_reason)
+    MEMBER_XPATH = '//aws:DescribeStackEventsResponse/aws:DescribeStackEventsResult/aws:StackEvents/aws:member'
+
+    def self.create_from_response(response)
+      members = response.xpath(MEMBER_XPATH, NS)
+
+      members.map{|member|
+        instance = new
+        member.xpath('*').each{|child|
+          instance[Vapour.snake_case(child.name)] = child.text
+        }
+        instance.timestamp = Time.iso8601(instance.timestamp)
+        instance
+      }
+    end
+  end
 end
 
 if __FILE__ == $0
   key = ENV['AWS_ACCESS_KEY_ID']
   secret = ENV['AWS_SECRET_ACCESS_KEY']
   vapour = Vapour.new(key, secret)
-  # vapour.create_stack('TestingFirst', 'TemplateBody' => File.read('template3.json'), 'Parameters' => { 'KeyPair' => '123', 'Version' => '22' })
 
-  p vapour.describe_stacks.map{|stack| [stack.name, stack.parameters['Version']] }
-  # puts vapour.describe_stack_resources('StackName' => 'sns2')
+  begin
+    pp vapour.describe_stack_events('StackName' => 'TestingFirst')
+    p vapour.describe_stacks.map{|stack| stack.name }
+  rescue Vapour::ValidationError
+    begin
+      p vapour.create_stack('TestingFirst', 'TemplateBody' => File.read('template3.json'), 'Parameters' => { 'KeyPair' => 'test123', 'Version' => '22' })
+    rescue Vapour::AlreadyExistsException
+      p vapour.delete_stack('TestingFirst')
+    end
+  end
+
+  p vapour.describe_stacks.map{|stack| stack.name }
 end
