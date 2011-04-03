@@ -10,12 +10,70 @@ require 'nokogiri'
 
 class Vapour
   Error = Class.new(RuntimeError)
-  ValidationError = Class.new(Error)
+
+  NS = {'aws' => 'http://cloudformation.amazonaws.com/doc/2010-05-15/'}
+  DIGEST = OpenSSL::Digest::Digest.new("sha256")
 
   def initialize(key, secret)
     @aws_key = key
     @aws_secret = secret
     @url = URI('https://cloudformation.eu-west-1.amazonaws.com/')
+  end
+
+  # +name+
+  #   The name associated with the stack. The name must be unique within your
+  #   AWS account.
+  #
+  # DisableRollbac
+  #   Boolean to enable or disable rollback on stack creation failures.
+  #   Default: false
+  #
+  # NotificationARNs.member.N
+  #   The Simple Notification Service (SNS) topic ARNs to publish stack related
+  #   events. You can find your SNS topic ARNs using the SNS console or your
+  #   Command Line Interface (CLI).
+  #
+  # Parameters.member.N
+  #   A list of Parameter structures.
+  #
+  # TemplateBody
+  #   Structure containing the template body. (For more information, go to the
+  #   AWS CloudFormation User Guide.)
+  #
+  #   Condition: You must pass TemplateBody or TemplateURL. If both are passed,
+  #   only TemplateBody is used.
+  #
+  # TemplateURL
+  #   Location of file containing the template body. The URL must point to a
+  #   template located in an S3 bucket in the same region as the stack. For
+  #   more information, go to the AWS CloudFormation User Guide.
+  #   Conditional: You must pass TemplateURL or TemplateBody. If both are
+  #   passed, only TemplateBody is used.
+  #
+  # TimeoutInMinutes
+  #   The amount of time that can pass before the stack status becomes
+  #   CREATE_FAILED; if DisableRollback is not set or is set to false, the
+  #   stack will be rolled back.
+  def create_stack(name, options = {})
+    given = options.dup
+    query = {'Action' => 'CreateStack', 'StackName' => name}
+
+    if parameters = given.delete('Parameters')
+      parameters.each_with_index do |(key, value), idx|
+        query["Parameters.member.#{idx + 1}.ParameterKey"] = key
+        query["Parameters.member.#{idx + 1}.ParameterValue"] = value
+      end
+    end
+
+    if notifications = given.delete('NotificationARNs')
+      notifications.each_with_index do |member, idx|
+        query["NotificationARNs.member.#{idx + 1}"] = member
+      end
+    end
+
+    query.merge!(given)
+
+    request(query)
   end
 
   def describe_stacks(name = nil)
@@ -72,8 +130,6 @@ class Vapour
     return url, data
   end
 
-  NS = {'aws' => 'http://cloudformation.amazonaws.com/doc/2010-05-15/'}
-
   def handle_success(response)
     Nokogiri::XML(response.body)
   end
@@ -84,10 +140,8 @@ class Vapour
     type = error.xpath('//aws:Type', NS).text
     code = error.xpath('//aws:Code', NS).text
     message = error.xpath('//aws:Message', NS).text
-    raise "Type: #{type}, Code: #{code}, Message: #{message}"
+    raise Error, "Type: #{type}, Code: #{code}, Message: #{message}"
   end
-
-  DIGEST = OpenSSL::Digest::Digest.new("sha256")
 
   def sign_request(verb, url, data)
     data['Timestamp'] ||= Time.now.utc.strftime('%Y-%m-%dT%H:%M:%S.000Z') unless data["Expires"]
@@ -149,8 +203,12 @@ class Vapour
   end
 end
 
-key = ENV['AWS_ACCESS_KEY_ID']
-secret = ENV['AWS_SECRET_ACCESS_KEY']
-vapour = Vapour.new(key, secret)
-pp vapour.describe_stacks
-# puts vapour.describe_stack_resources('StackName' => 'sns2')
+if __FILE__ == $0
+  key = ENV['AWS_ACCESS_KEY_ID']
+  secret = ENV['AWS_SECRET_ACCESS_KEY']
+  vapour = Vapour.new(key, secret)
+  # vapour.create_stack('TestingFirst', 'TemplateBody' => File.read('template3.json'), 'Parameters' => { 'KeyPair' => '123', 'Version' => '22' })
+
+  p vapour.describe_stacks.map{|stack| [stack.name, stack.parameters['Version']] }
+  # puts vapour.describe_stack_resources('StackName' => 'sns2')
+end
