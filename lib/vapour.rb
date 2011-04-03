@@ -121,9 +121,12 @@ class Vapour
   #   LogicalResourceId
   #   PhysicalResourceId
   #   StackName
-  def describe_stack_resources(query = {})
-    pass = {'Action' => 'DescribeStackResources'}.merge(query)
-    request(pass)
+  def describe_stack_resources(options = {})
+    query = {'Action' => 'DescribeStackResources'}.merge(options)
+    response = request(query)
+    rid = response.xpath('//aws:DescribeStackResourcesResponse/aws:ResponseMetadata/aws:RequestId', NS).text
+    resources = StackResource.create_from_response(response)
+    return {:request_id => rid, :stack_resources => resources}
   end
 
   # Validates a specified template.
@@ -227,7 +230,7 @@ class Vapour
           stack_member.xpath('aws:DisableRollback', NS).text == 'true',
           stack_member.xpath('aws:StackStatusReason', NS).text,
           {},
-          {},
+          {}
         )
 
         stack_member.xpath('aws:Parameters/aws:member', NS).each do |member|
@@ -265,6 +268,25 @@ class Vapour
       }
     end
   end
+
+  class StackResource < Struct.new(
+    :timestamp, :resource_status, :stack_id, :logical_resource_id, :stack_name,
+    :physical_resource_id, :resource_type)
+    MEMBER_XPATH = '//aws:DescribeStackResourcesResponse/aws:DescribeStackResourcesResult/aws:StackResources/aws:member'
+
+    def self.create_from_response(response)
+      members = response.xpath(MEMBER_XPATH, NS)
+
+      members.map{|member|
+        instance = new
+        member.xpath('*').each{|child|
+          instance[Vapour.snake_case(child.name)] = child.text
+        }
+        instance.timestamp = Time.iso8601(instance.timestamp)
+        instance
+      }
+    end
+  end
 end
 
 if __FILE__ == $0
@@ -272,16 +294,5 @@ if __FILE__ == $0
   secret = ENV['AWS_SECRET_ACCESS_KEY']
   vapour = Vapour.new(key, secret)
 
-  begin
-    pp vapour.describe_stack_events('StackName' => 'TestingFirst')
-    p vapour.describe_stacks.map{|stack| stack.name }
-  rescue Vapour::ValidationError
-    begin
-      p vapour.create_stack('TestingFirst', 'TemplateBody' => File.read('template3.json'), 'Parameters' => { 'KeyPair' => 'test123', 'Version' => '22' })
-    rescue Vapour::AlreadyExistsException
-      p vapour.delete_stack('TestingFirst')
-    end
-  end
-
-  p vapour.describe_stacks.map{|stack| stack.name }
+  pp vapour.describe_stack_resources('StackName' => 'sns2')
 end
